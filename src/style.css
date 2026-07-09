@@ -1,0 +1,31 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+:root {
+  font-family: Inter, "Segoe UI", Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  color: var(--p-text-color);
+  background-color: var(--p-content-background);
+}
+
+code,
+.mono {
+  font-family: Consolas, "Cascadia Mono", "JetBrains Mono", monospace;
+}

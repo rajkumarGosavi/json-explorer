@@ -1,0 +1,15 @@
+# Pure-Rust structural indexer for huge JSON files. No tauri dependency —
+# keeps unit tests and benches fast and runnable in isolation.
+[package]
+name = "json-index"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memchr = "2"
+regex = "1"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+memmap2 = "0.9"

@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/json-index"]
+
+[package]
+name = "json-explorer"
+version = "0.1.0"
+description = "Local JSON explorer for huge (1-2 GB) files"
+authors = ["Rajkumar"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "json_explorer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+json-index = { path = "crates/json-index" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memmap2 = "0.9"
+parking_lot = "0.12"
+thiserror = "2"
