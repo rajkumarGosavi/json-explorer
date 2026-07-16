@@ -4,7 +4,7 @@
 //! using the same primitives but trusts the input (already validated here).
 
 use crate::error::IndexError;
-use crate::index::{NodeRef, RootKind, StructuralIndex};
+use crate::index::{NodeRef, RootKind, StructuralIndex, NO_PARENT};
 use crate::raw::{skip_literal, skip_number, skip_string, skip_ws};
 
 pub fn build_index(buf: &[u8]) -> Result<StructuralIndex, IndexError> {
@@ -41,7 +41,7 @@ pub fn build_index_with_progress(
 
     // More content after the first value: NDJSON / concatenated JSON.
     let mut doc_starts = vec![doc_start_of(first_ref, &index)];
-    let mut doc_refs = vec![first_ref];
+    let mut doc_refs = vec![with_doc_index(first_ref, 0)];
     loop {
         skip_ws(buf, &mut pos);
         if pos >= buf.len() {
@@ -49,6 +49,7 @@ pub fn build_index_with_progress(
         }
         let start = pos as u64;
         let r = scan_value(buf, &mut pos, &mut index, -1, on_progress)?;
+        let r = with_doc_index(r, doc_refs.len() as u32);
         doc_starts.push(start);
         doc_refs.push(r);
         skip_ws(buf, &mut pos);
@@ -67,12 +68,35 @@ fn doc_start_of(node: NodeRef, index: &StructuralIndex) -> u64 {
     }
 }
 
+/// Top-level scalar leaves come out of `scan_value` with a placeholder
+/// `child_idx` of 0 (it has no way to know its position among sibling
+/// top-level documents). Once we know that position, stamp it in so
+/// `NodeRef::Leaf { parent: NO_PARENT, child_idx }` uniquely identifies which
+/// document it is — see index.rs's `node_at_offset`/`path_of`/`NO_PARENT`.
+fn with_doc_index(node: NodeRef, idx: u32) -> NodeRef {
+    match node {
+        NodeRef::Leaf { parent, .. } if parent == NO_PARENT => {
+            NodeRef::Leaf { parent: NO_PARENT, child_idx: idx }
+        }
+        other => other,
+    }
+}
+
 /// Scans one JSON value at `*pos`, recursing into containers so their
 /// children get registered (`note_child`) and bounds get closed. Returns a
 /// NodeRef describing the value (Container id, or a synthetic Leaf marker
 /// with parent = the given `parent` — leaves outside any container, i.e.
-/// top-level scalars, use parent = u32::MAX as a sentinel meaning "no
-/// parent"; such documents have no addressable path beyond the root).
+/// top-level scalars, use parent = NO_PARENT as a sentinel meaning "no
+/// parent"; such documents are addressed by their doc index instead, see
+/// `with_doc_index`).
+fn leaf_parent(parent: i64) -> u32 {
+    if parent < 0 {
+        NO_PARENT
+    } else {
+        parent as u32
+    }
+}
+
 fn scan_value(
     buf: &[u8],
     pos: &mut usize,
@@ -91,7 +115,7 @@ fn scan_value(
                 return Err(syntax_err(buf, *pos, "unterminated string"));
             }
             Ok(NodeRef::Leaf {
-                parent: parent.max(-1) as u32,
+                parent: leaf_parent(parent),
                 child_idx: 0,
             })
         }
@@ -99,19 +123,19 @@ fn scan_value(
             if !skip_literal(buf, pos, b"true") {
                 return Err(syntax_err(buf, *pos, "invalid literal"));
             }
-            Ok(NodeRef::Leaf { parent: parent.max(-1) as u32, child_idx: 0 })
+            Ok(NodeRef::Leaf { parent: leaf_parent(parent), child_idx: 0 })
         }
         b'f' => {
             if !skip_literal(buf, pos, b"false") {
                 return Err(syntax_err(buf, *pos, "invalid literal"));
             }
-            Ok(NodeRef::Leaf { parent: parent.max(-1) as u32, child_idx: 0 })
+            Ok(NodeRef::Leaf { parent: leaf_parent(parent), child_idx: 0 })
         }
         b'n' => {
             if !skip_literal(buf, pos, b"null") {
                 return Err(syntax_err(buf, *pos, "invalid literal"));
             }
-            Ok(NodeRef::Leaf { parent: parent.max(-1) as u32, child_idx: 0 })
+            Ok(NodeRef::Leaf { parent: leaf_parent(parent), child_idx: 0 })
         }
         b'-' | b'0'..=b'9' => {
             let start = *pos;
@@ -119,7 +143,7 @@ fn scan_value(
             if *pos == start {
                 return Err(syntax_err(buf, *pos, "invalid number"));
             }
-            Ok(NodeRef::Leaf { parent: parent.max(-1) as u32, child_idx: 0 })
+            Ok(NodeRef::Leaf { parent: leaf_parent(parent), child_idx: 0 })
         }
         _ => Err(syntax_err(buf, *pos, "unexpected character")),
     }

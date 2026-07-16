@@ -1,21 +1,154 @@
 <script setup lang="ts">
-// M0 stub — file dialog + drag-drop + indexing progress land in M3.
+import { onMounted, onUnmounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
+import { onDragDrop, pickJsonFile } from "@/api/ipc";
+import { useFileStore } from "@/stores/file";
+import { formatBytes } from "@/utils/format";
+
+const store = useFileStore();
+const router = useRouter();
+const dragActive = ref(false);
+let unlisten: (() => void) | null = null;
+
+onMounted(async () => {
+  await store.init();
+  unlisten = await onDragDrop({
+    onEnter: () => (dragActive.value = true),
+    onLeave: () => (dragActive.value = false),
+    onDrop: (paths) => {
+      dragActive.value = false;
+      if (paths.length > 0) void store.open(paths[0]);
+    },
+  });
+});
+onUnmounted(() => unlisten?.());
+
+watch(
+  () => store.phase,
+  (phase) => {
+    if (phase === "ready") void router.push({ name: "explore" });
+  },
+);
+
+async function browse() {
+  const path = await pickJsonFile();
+  if (path) void store.open(path);
+}
 </script>
 
 <template>
   <main class="open-view">
-    <h1>JSON Explorer</h1>
-    <p>Open a JSON file to explore it. (Coming in the next milestone.)</p>
+    <div class="panel">
+      <i class="pi pi-search icon" />
+      <h1>JSON Explorer</h1>
+      <p class="hint">
+        Drop a JSON or NDJSON file anywhere in this window, or browse for one.
+        Files are indexed in place — even multi-gigabyte files open quickly.
+      </p>
+      <Button
+        label="Open file…"
+        icon="pi pi-folder-open"
+        :disabled="store.phase === 'indexing'"
+        @click="browse"
+      />
+
+      <div v-if="store.phase === 'indexing'" class="progress">
+        <ProgressBar
+          :mode="store.bytesTotal > 0 ? 'determinate' : 'indeterminate'"
+          :value="store.progressPercent"
+          :show-value="false"
+          style="height: 6px"
+        />
+        <p class="progress-label mono">
+          Indexing {{ store.path }}
+          <template v-if="store.bytesTotal > 0">
+            — {{ formatBytes(store.bytesDone) }} /
+            {{ formatBytes(store.bytesTotal) }}
+          </template>
+        </p>
+      </div>
+
+      <Message
+        v-else-if="store.phase === 'error' && store.error"
+        severity="error"
+        class="error"
+      >
+        <strong>Could not open {{ store.path }}</strong
+        ><br />
+        {{ store.error.message }}
+        <template v-if="store.error.line > 0">
+          (line {{ store.error.line }}, column {{ store.error.col }})
+        </template>
+      </Message>
+    </div>
+
+    <div v-if="dragActive" class="drop-overlay">
+      <span>Drop to open</span>
+    </div>
   </main>
 </template>
 
 <style scoped>
 .open-view {
+  position: relative;
   height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 0.75rem;
+  max-width: 34rem;
+  text-align: center;
+  padding: 1rem;
+}
+
+.icon {
+  font-size: 2.5rem;
+  color: var(--p-primary-color);
+}
+
+h1 {
+  margin: 0;
+}
+
+.hint {
+  margin: 0 0 0.5rem;
+  color: var(--p-text-muted-color);
+}
+
+.progress {
+  width: 100%;
+  margin-top: 1rem;
+}
+
+.progress-label {
+  font-size: 0.8rem;
+  color: var(--p-text-muted-color);
+  word-break: break-all;
+}
+
+.error {
+  margin-top: 1rem;
+  max-width: 100%;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
   justify-content: center;
-  gap: 0.5rem;
+  background: color-mix(in srgb, var(--p-primary-color) 12%, transparent);
+  border: 3px dashed var(--p-primary-color);
+  border-radius: 8px;
+  pointer-events: none;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--p-primary-color);
 }
 </style>

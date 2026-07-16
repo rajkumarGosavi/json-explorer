@@ -212,6 +212,262 @@ fn oracle_matches_serde_json_for_small_fixtures() {
     }
 }
 
+#[test]
+fn children_seek_past_multiple_object_entries_does_not_panic() {
+    // Regression test: children()'s "seek to offset" loop used to call
+    // skip_entry() directly on object entries, which only consumes the key
+    // (a quoted string looks like any other value to it) and never the ':'
+    // or the value — leaving `pos` stuck on ':' and corrupting all further
+    // parsing. This only shows up when the requested offset isn't a
+    // checkpoint boundary (a multiple of CHECKPOINT_STRIDE), i.e. almost any
+    // real object with more than one key.
+    let buf = br#"{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}"#;
+    let idx = build_index(buf).unwrap();
+    for i in 0..5u64 {
+        let children = idx.children(buf, 0, i, 1);
+        assert_eq!(children.len(), 1, "seeking to offset {i}");
+        let expected_key = ((b'a' + i as u8) as char).to_string();
+        assert_eq!(children[0].key.as_deref(), Some(expected_key.as_str()));
+    }
+}
+
+#[test]
+fn path_of_resolves_key_beyond_first_object_entry() {
+    // path_of -> key_at -> children(buf, parent, idx, 1) with a non-zero,
+    // non-checkpoint-aligned idx is exactly the call pattern search hits
+    // exercise for almost every result (see the regression test above for
+    // the underlying bug this used to hit).
+    let buf = br#"{"a": 1, "b": 2, "c": {"needle": true}, "d": 4}"#;
+    let idx = build_index(buf).unwrap();
+    let needle_offset = buf.windows(6).position(|w| w == b"needle").unwrap() as u64;
+    let (node, path) = idx.node_at_offset(buf, needle_offset);
+    assert!(matches!(node, NodeRef::Leaf { .. }) || matches!(node, NodeRef::Container(_)));
+    let path_str: Vec<String> = path
+        .iter()
+        .map(|s| s.key.clone().unwrap_or_else(|| s.index.to_string()))
+        .collect();
+    assert_eq!(path_str, vec!["c"]);
+}
+
+#[test]
+fn search_across_many_sibling_object_keys_resolves_paths_without_panicking() {
+    // End-to-end version of the two tests above: a top-level array of
+    // objects each with several keys, searched for a value that only occurs
+    // in later keys/objects, forcing path resolution through non-checkpoint
+    // offsets repeatedly.
+    let mut buf = String::from("[");
+    for i in 0..50u32 {
+        if i > 0 {
+            buf.push(',');
+        }
+        buf.push_str(&format!(
+            r#"{{"id":{i},"name":"n{i}","tag":"x","note":"marker{i}","extra":0}}"#
+        ));
+    }
+    buf.push(']');
+    let buf = buf.into_bytes();
+    let idx = build_index(&buf).unwrap();
+    let mut hits = Vec::new();
+    let (count, _) = search_bytes(&buf, &idx, "marker", false, true, |h| {
+        hits.push(h);
+        true
+    });
+    assert_eq!(count, 50);
+    for (i, hit) in hits.iter().enumerate() {
+        assert_eq!(hit.path, format!("$[{i}].note"));
+    }
+}
+
+// --- Search edge cases found while investigating "search is slow / panics"
+// reports. `node_at_offset` (index.rs) resolves a search-hit byte offset to a
+// tree path by linearly scanning every container's [start, end) range, once
+// per hit. These tests pin down correctness at the boundaries that scan
+// touches; `examples/bench_search.rs` shows the resulting time complexity.
+
+#[test]
+fn search_hit_at_very_start_of_buffer_does_not_panic() {
+    // offset 0 is less than PREVIEW_RADIUS (80), exercising the
+    // saturating_sub underflow guard in build_hit.
+    let buf = br#"["hi"]"#;
+    let idx = build_index(buf).unwrap();
+    let mut hits = Vec::new();
+    let (count, _) = search_bytes(buf, &idx, "[", false, true, |h| {
+        hits.push(h);
+        true
+    });
+    assert_eq!(count, 1);
+    assert_eq!(hits[0].byte_offset, 0);
+}
+
+#[test]
+fn search_hit_at_very_end_of_buffer_does_not_panic() {
+    // Match's end (offset + len) sits at buf.len(), exercising the
+    // preview-window's upper clamp.
+    let buf = br#"["z"]"#;
+    let idx = build_index(buf).unwrap();
+    let mut hits = Vec::new();
+    let (count, _) = search_bytes(buf, &idx, "]", false, true, |h| {
+        hits.push(h);
+        true
+    });
+    assert_eq!(count, 1);
+    assert_eq!(hits[0].byte_offset as usize, buf.len() - 1);
+}
+
+#[test]
+fn search_matching_structural_characters_resolves_to_container_path() {
+    // "," and ":" only ever appear as JSON syntax, never inside a value's own
+    // byte range, so node_at_offset's per-child scan should fall back to the
+    // enclosing container rather than panicking or matching a wrong leaf.
+    let buf = br#"{"a": 1, "b": 2}"#;
+    let idx = build_index(buf).unwrap();
+    let mut hits = Vec::new();
+    let (count, _) = search_bytes(buf, &idx, ",", false, true, |h| {
+        hits.push(h);
+        true
+    });
+    assert_eq!(count, 1);
+    assert_eq!(hits[0].path, "$");
+}
+
+#[test]
+fn search_resolves_correct_innermost_container_among_many_nested() {
+    // 500 nested arrays means node_at_offset's linear "smallest enclosing
+    // range" scan has to correctly pick the *innermost* of 500 overlapping
+    // ranges, not just the first one found.
+    let mut s = String::new();
+    for _ in 0..500 {
+        s.push('[');
+    }
+    s.push_str("\"needle\"");
+    for _ in 0..500 {
+        s.push(']');
+    }
+    let buf = s.as_bytes();
+    let idx = build_index(buf).unwrap();
+    let mut hits = Vec::new();
+    let (count, _) = search_bytes(buf, &idx, "needle", false, true, |h| {
+        hits.push(h);
+        true
+    });
+    assert_eq!(count, 1);
+    assert!(matches!(hits[0].node, NodeRef::Leaf { .. }));
+    // Path should have exactly 500 numeric segments (index 0 at every level).
+    assert_eq!(hits[0].path, format!("${}", "[0]".repeat(500)));
+}
+
+#[test]
+fn search_invalid_regex_returns_no_hits_instead_of_panicking() {
+    let buf = br#"{"a": 1}"#;
+    let idx = build_index(buf).unwrap();
+    let (count, truncated) = search_bytes(buf, &idx, "(unclosed", true, true, |_h| true);
+    assert_eq!(count, 0);
+    assert!(!truncated);
+}
+
+#[test]
+fn search_empty_query_string_does_not_panic() {
+    // Frontend guards against blank queries (see useSearch.test.ts), but the
+    // Rust layer should still behave sanely if ever called directly with "".
+    let buf = br#"{"a": 1}"#;
+    let idx = build_index(buf).unwrap();
+    let (count, _) = search_bytes(buf, &idx, "", false, true, |_h| true);
+    // Empty literal "matches" at every byte position (including buf.len()+1
+    // positions) via memmem; just assert it terminates and doesn't panic.
+    assert!(count > 0);
+}
+
+#[test]
+fn ndjson_scalar_top_level_docs_resolve_to_their_doc_index() {
+    // NDJSON where each line is a bare scalar (no enclosing object/array).
+    // These docs aren't recorded as containers, so node_at_offset resolves
+    // them via RootKind::MultiDoc's doc_starts instead (root_scalar_at).
+    let buf = b"\"apple\"\n\"banana\"\n\"cherry\"\n";
+    let idx = build_index(buf).unwrap();
+    match &idx.root {
+        RootKind::MultiDoc { doc_refs, .. } => assert_eq!(doc_refs.len(), 3),
+        RootKind::Single(_) => panic!("expected MultiDoc"),
+    }
+
+    // Each doc's node must resolve to the right path AND be distinguishable
+    // from the others once encoded for IPC — this used to collide, because
+    // the old sentinel parent value for root-level scalars (u32::MAX) set
+    // the same bit NodeRef::encode uses to tag containers, so every scalar
+    // doc round-tripped back as Container(0) regardless of which doc it was.
+    let mut ids = Vec::new();
+    for (query, expected_idx) in [("apple", 0u64), ("banana", 1), ("cherry", 2)] {
+        let mut hits = Vec::new();
+        let (count, _) = search_bytes(buf, &idx, query, false, true, |h| {
+            hits.push(h);
+            true
+        });
+        assert_eq!(count, 1, "query {query:?}");
+        assert_eq!(hits[0].path, format!("$[{expected_idx}]"));
+        let encoded = hits[0].node.encode();
+        assert_eq!(
+            NodeRef::decode(encoded),
+            hits[0].node,
+            "encode/decode round-trip must preserve the Leaf, not collide \
+             with the Container tag bit"
+        );
+        ids.push(encoded);
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+    assert_ne!(ids[0], ids[2]);
+}
+
+#[test]
+fn root_scalar_leaf_id_does_not_collide_with_container_tag() {
+    // Direct regression test for the NO_PARENT sentinel fix: a Leaf using
+    // the old sentinel (u32::MAX) would encode with bit 63 set, which
+    // NodeRef::decode reads as "this is a Container". NO_PARENT's MSB is 0,
+    // so it must decode back as the same Leaf.
+    let leaf = NodeRef::Leaf { parent: crate::index::NO_PARENT, child_idx: 7 };
+    let encoded = leaf.encode();
+    assert_eq!(NodeRef::decode(encoded), leaf);
+    assert_ne!(
+        NodeRef::decode(encoded),
+        NodeRef::Container(7),
+        "must not be misread as a container"
+    );
+}
+
+/// Not a perf assertion (timing thresholds are flaky across machines) — this
+/// is a regression guard for `StructuralIndex::innermost_container_at`
+/// (index.rs): it used to be an `O(container_count)` linear scan per hit,
+/// making total search cost `O(hits * container_count)`. It's now a binary
+/// search plus a parent-chain walk bounded by nesting depth. Run with
+/// `cargo test --release -- --ignored --nocapture` to see wall-clock time
+/// stay flat as container_count grows; compare against
+/// examples/bench_search.rs for a realistic file-sized measurement.
+#[test]
+#[ignore]
+fn search_many_containers_smoke_timing() {
+    use std::time::Instant;
+    // Every record is its own object containing a nested array -> 2 containers
+    // per record, so N records means ~2N entries in `starts`.
+    let mut s = String::from(r#"{"records":["#);
+    for i in 0..20_000u32 {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            r#"{{"id":{i},"tags":["a","b","c"],"note":"the quick brown fox {i}"}}"#
+        ));
+    }
+    s.push_str("]}");
+    let buf = s.as_bytes();
+    let idx = build_index(buf).unwrap();
+    eprintln!("container_count = {}", idx.container_count());
+
+    let start = Instant::now();
+    let (count, _) = search_bytes(buf, &idx, "fox", false, true, |_h| true);
+    let elapsed = start.elapsed();
+    eprintln!("{count} hits over {} containers in {elapsed:?}", idx.container_count());
+    assert_eq!(count, 20_000);
+}
+
 fn verify_against_oracle(
     buf: &[u8],
     idx: &crate::index::StructuralIndex,

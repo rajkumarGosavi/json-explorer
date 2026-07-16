@@ -5,7 +5,7 @@ use crate::dto::{
 use crate::state::{AppState, Session};
 use json_index::{
     build_index_with_progress, leaf_value_end, peek_scalar_kind, search_bytes, IndexError,
-    JsonKind, NodeRef, RootKind,
+    JsonKind, NodeRef, RootKind, NO_PARENT,
 };
 use memmap2::Mmap;
 use std::fs::File;
@@ -222,6 +222,17 @@ pub fn get_node_value(
 
     let (start, end) = match node_ref {
         NodeRef::Container(id) => index.bounds(id),
+        // Root-level scalar document in a MultiDoc (NDJSON) root: no
+        // enclosing container to look up via children(), child_idx is its
+        // position among sibling top-level documents instead.
+        NodeRef::Leaf { parent, child_idx } if parent == NO_PARENT => match &index.root {
+            RootKind::MultiDoc { doc_starts, .. } => {
+                let start = *doc_starts.get(child_idx as usize).ok_or("node not found")?;
+                let end = leaf_value_end(buf, start);
+                (start, end)
+            }
+            _ => return Err("node not found".to_string()),
+        },
         NodeRef::Leaf { parent, child_idx } => {
             let children = index.children(buf, parent, child_idx as u64, 1);
             let c = children.first().ok_or("node not found")?;

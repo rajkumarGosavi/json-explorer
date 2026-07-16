@@ -27,3 +27,13 @@ serde_json = "1"
 memmap2 = "0.9"
 parking_lot = "0.12"
 thiserror = "2"
+
+# `pnpm tauri dev` builds this workspace at the default dev profile
+# (opt-level = 0). json-index does byte-level scanning over multi-MB/GB
+# mmap'd files, which is 10-30x slower unoptimized than at opt-level 3 — on a
+# 25MB file with ~96k containers that's the difference between a search
+# finishing in a few seconds and looking hung for a minute+. Keep the app
+# crate itself at fast-to-recompile debug settings; only force optimization
+# on the perf-critical crate.
+[profile.dev.package.json-index]
+opt-level = 3

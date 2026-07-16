@@ -14,7 +14,7 @@ pub mod search;
 pub use error::IndexError;
 pub use index::{
     leaf_value_end, peek_scalar_kind, JsonKind, NodeRef, PathSegment, RawChild, RootKind,
-    StructuralIndex,
+    StructuralIndex, NO_PARENT,
 };
 pub use scanner::{build_index, build_index_with_progress};
 pub use search::{search_bytes, SearchHit};

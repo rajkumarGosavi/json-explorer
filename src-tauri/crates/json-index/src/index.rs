@@ -7,6 +7,15 @@ use crate::raw::{skip_literal, skip_number, skip_string, skip_ws, unescape};
 
 pub const CHECKPOINT_STRIDE: u64 = 1024;
 
+/// Sentinel `parent` for a `NodeRef::Leaf` describing a root-level scalar
+/// document (no enclosing container) — see `RootKind::MultiDoc`/`Single` and
+/// `scanner::scan_value`. Deliberately *not* `u32::MAX`: encoding packs
+/// `parent` into the top 32 bits of the id, and `u32::MAX` there sets bit 63,
+/// which collides with `NodeRef::encode`'s container tag bit and made every
+/// such leaf decode back as `Container(child_idx)`. This sentinel's MSB is 0,
+/// so it can never collide with that tag.
+pub const NO_PARENT: u32 = u32::MAX >> 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonKind {
     Object,
@@ -197,6 +206,16 @@ impl StructuralIndex {
         let mut out = Vec::new();
 
         while idx < offset {
+            if is_obj {
+                // Entries here are key-value pairs: skip_entry alone only
+                // consumes the key (a quoted string looks like any other
+                // value to it), leaving pos stuck on ':' — skip key, ':',
+                // then the value, same order as the materializing loop below.
+                skip_string(buf, &mut pos);
+                skip_ws(buf, &mut pos);
+                pos += 1; // ':'
+                skip_ws(buf, &mut pos);
+            }
             skip_entry(buf, &mut pos, is_obj);
             idx += 1;
             skip_ws(buf, &mut pos);
@@ -248,6 +267,13 @@ impl StructuralIndex {
         let mut chain: Vec<(u32, u64)> = Vec::new(); // (parent_container, child_index)
         let leaf_parent_idx = match node {
             NodeRef::Root => return Vec::new(),
+            // Root-level scalar document (RootKind::Single, or one entry of
+            // a RootKind::MultiDoc): no enclosing container, so child_idx is
+            // its position among sibling top-level documents, not a real
+            // container child index.
+            NodeRef::Leaf { parent, child_idx } if parent == NO_PARENT => {
+                return vec![PathSegment { key: None, index: child_idx as u64 }];
+            }
             NodeRef::Leaf { parent, child_idx } => Some((parent, child_idx as u64)),
             NodeRef::Container(id) => {
                 let mut cur = id;
@@ -337,21 +363,8 @@ impl StructuralIndex {
     /// path down to the exact node at that offset (used to map a search hit
     /// byte offset back to a tree location).
     pub fn node_at_offset(&self, buf: &[u8], off: u64) -> (NodeRef, Vec<PathSegment>) {
-        // Binary search over starts (sorted ascending, document order) for the
-        // innermost container containing off.
-        let mut candidate: Option<u32> = None;
-        for id in 0..self.starts.len() as u32 {
-            let (s, e) = self.bounds(id);
-            if s <= off
-                && off < e
-                && (candidate.is_none()
-                    || (e - s) < (self.bounds(candidate.unwrap()).1 - self.bounds(candidate.unwrap()).0))
-            {
-                candidate = Some(id);
-            }
-        }
-        match candidate {
-            None => (NodeRef::Root, Vec::new()),
+        match self.innermost_container_at(off) {
+            None => self.root_scalar_at(buf, off),
             Some(container) => {
                 // Find which direct child of `container` contains off (leaf or
                 // nested container) by scanning with checkpoints.
@@ -394,6 +407,73 @@ impl StructuralIndex {
                 }
                 (NodeRef::Container(container), self.path_of(buf, NodeRef::Container(container)))
             }
+        }
+    }
+
+    /// Innermost container whose `[start, end)` range contains `off`, or
+    /// `None` if `off` isn't inside any container (e.g. a root-level scalar).
+    ///
+    /// `starts` is ascending — containers are assigned ids in left-to-right
+    /// scan order, so a nested container always starts after its parent and
+    /// before any sibling. A binary search for the last container starting
+    /// at or before `off` is therefore O(log n); since JSON containers nest
+    /// without partial overlap, if *any* container contains `off` it must be
+    /// that one or one of its ancestors (a container that starts later than
+    /// an ancestor but at/before `off` can only be nested inside it), so the
+    /// walk up `parent_of` is bounded by nesting depth, not container count.
+    /// This replaces an old `O(container_count)` linear scan that made
+    /// search cost `O(hits * container_count)` on large files.
+    fn innermost_container_at(&self, off: u64) -> Option<u32> {
+        let mut lo = 0usize;
+        let mut hi = self.starts.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.starts[mid] <= off {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo == 0 {
+            return None; // no container starts at or before off
+        }
+        let mut id = (lo - 1) as u32;
+        loop {
+            let (s, e) = self.bounds(id);
+            if s <= off && off < e {
+                return Some(id);
+            }
+            id = self.parent_of(id)?;
+        }
+    }
+
+    /// Fallback for offsets that aren't inside any container: either the
+    /// whole file is a single top-level scalar (`RootKind::Single`), or
+    /// `off` lands inside one of several NDJSON/concatenated-JSON top-level
+    /// scalar documents (`RootKind::MultiDoc`). `doc_starts` is ascending
+    /// (documents are scanned left to right), so binary search finds which
+    /// doc `off` falls in, in O(log docs).
+    fn root_scalar_at(&self, buf: &[u8], off: u64) -> (NodeRef, Vec<PathSegment>) {
+        let RootKind::MultiDoc { doc_starts, doc_refs } = &self.root else {
+            return (NodeRef::Root, Vec::new());
+        };
+        let idx = match doc_starts.binary_search(&off) {
+            Ok(i) => i,
+            Err(0) => return (NodeRef::Root, Vec::new()), // before the first doc
+            Err(i) => i - 1,
+        };
+        let doc_ref = doc_refs[idx];
+        let end = match doc_ref {
+            // Containers are already handled by innermost_container_at, but
+            // stay correct defensively if one ever reaches here.
+            NodeRef::Container(id) => self.bounds(id).1,
+            _ => leaf_value_end(buf, doc_starts[idx]),
+        };
+        if off < end {
+            (doc_ref, vec![PathSegment { key: None, index: idx as u64 }])
+        } else {
+            // off is in whitespace between documents.
+            (NodeRef::Root, Vec::new())
         }
     }
 }

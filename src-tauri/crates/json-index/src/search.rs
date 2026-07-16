@@ -55,7 +55,10 @@ pub fn search_bytes(
     } else if case_sensitive {
         let finder = memmem::Finder::new(query.as_bytes());
         let mut start = 0usize;
-        while let Some(pos) = finder.find(&buf[start..]) {
+        // An empty query matches even at buf.len() itself, so `start` can
+        // walk one past the end; buf.get(..) turns that into a clean loop
+        // exit instead of an out-of-bounds slice panic.
+        while let Some(pos) = buf.get(start..).and_then(|s| finder.find(s)) {
             let abs = start + pos;
             if !emit(abs, query.len()) {
                 break;

@@ -23,7 +23,6 @@ export interface NodeSummary {
 export interface PathSegment {
   key: string | null;
   index: number;
-  nodeId: string;
 }
 
 export interface SearchHit {

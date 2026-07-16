@@ -147,6 +147,10 @@ mod tests {
             NodeRef::Container(u32::MAX - 1),
             NodeRef::Leaf { parent: 0, child_idx: 0 },
             NodeRef::Leaf { parent: 42, child_idx: 1_000_000 },
+            // Root-level scalar docs (RootKind::MultiDoc) use this sentinel.
+            // It must NOT round-trip as a Container — that was the bug this
+            // case guards against (see json_index::NO_PARENT's doc comment).
+            NodeRef::Leaf { parent: json_index::NO_PARENT, child_idx: 5 },
         ] {
             let s = encode_node(node);
             let back = decode_node(&s).unwrap();

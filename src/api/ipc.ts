@@ -3,6 +3,8 @@
 // about command names, event names, and the string-encoded u64 DTOs.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   FileMeta,
   IndexError,
@@ -56,6 +58,19 @@ export function closeFile(): Promise<void> {
   return invoke("close_file");
 }
 
+/** Native open-file dialog. Resolves to null if the user cancelled. */
+export async function pickJsonFile(): Promise<string | null> {
+  const picked = await openDialog({
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "JSON", extensions: ["json", "ndjson", "jsonl", "geojson"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  return picked as string | null;
+}
+
 // --- Event listeners -------------------------------------------------------
 // Every listener returns its Tauri unlisten fn; callers MUST invoke it on
 // close/unmount. Duplicate handlers otherwise stack up across reopen cycles
@@ -89,4 +104,30 @@ export function onSearchDone(
   return listen<{ total: number; truncated: boolean }>("search://done", (e) =>
     cb(e.payload),
   );
+}
+
+export interface DragDropHandlers {
+  onEnter?: () => void;
+  onLeave?: () => void;
+  onDrop: (paths: string[]) => void;
+}
+
+/**
+ * Native webview drag-drop (dragDropEnabled is on, so HTML5 drop events
+ * never fire — this is the only way to receive dropped file paths).
+ */
+export function onDragDrop(h: DragDropHandlers): Promise<UnlistenFn> {
+  return getCurrentWebview().onDragDropEvent((event) => {
+    switch (event.payload.type) {
+      case "enter":
+        h.onEnter?.();
+        break;
+      case "leave":
+        h.onLeave?.();
+        break;
+      case "drop":
+        h.onDrop(event.payload.paths);
+        break;
+    }
+  });
 }
