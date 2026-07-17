@@ -1,36 +1,130 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import ContextMenu from "primevue/contextmenu";
+import type { MenuItem } from "primevue/menuitem";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
+import { getNodeValue, getPath } from "@/api/ipc";
 import InspectorPane from "@/components/InspectorPane.vue";
 import SearchPanel from "@/components/SearchPanel.vue";
 import TreeRow from "@/components/TreeRow.vue";
+import { nextAction } from "@/composables/treeNav";
 import { useTree } from "@/composables/useTree";
 import { useFileStore } from "@/stores/file";
+import { copyText } from "@/utils/clipboard";
 import { formatBytes } from "@/utils/format";
+import { pathToString } from "@/utils/jsonPath";
+
+/** Matches MAX_VALUE_CAP in commands.rs — a copied subtree/value is capped. */
+const MAX_VALUE_BYTES = 1024 * 1024;
 
 const store = useFileStore();
 const router = useRouter();
 const { rows, error, loadRoot, toggle, loadMore } = useTree();
 const selectedId = ref<string | null>(null);
+/** Keyboard cursor, tracked by rowId so "more" rows are addressable too. */
+const cursorRowId = ref<string | null>(null);
 const searchOpen = ref(false);
+
+const treePanel = ref<HTMLElement | null>(null);
+const scrollerRef = ref<{ scrollToItem?: (index: number) => void } | null>(null);
+const menuRef = ref<InstanceType<typeof ContextMenu> | null>(null);
+const contextNodeId = ref<string | null>(null);
+
+function onSelect(nodeId: string) {
+  selectedId.value = nodeId;
+  cursorRowId.value = nodeId; // a node row's rowId equals its nodeId
+}
 
 function onSearchSelect(nodeId: string) {
   selectedId.value = nodeId;
+  cursorRowId.value = nodeId;
 }
 
 const fileName = computed(
   () => store.meta?.path.split(/[\\/]/).pop() ?? "",
 );
 
-onMounted(() => {
+// --- Right-click copy menu -------------------------------------------------
+
+const menuItems: MenuItem[] = [
+  { label: "Copy key", icon: "pi pi-key", command: () => void copyKey() },
+  { label: "Copy path", icon: "pi pi-sitemap", command: () => void copyPath() },
+  { label: "Copy value", icon: "pi pi-copy", command: () => void copyValue() },
+];
+
+function onContext(nodeId: string, event: MouseEvent) {
+  contextNodeId.value = nodeId;
+  menuRef.value?.show(event);
+}
+
+async function copyKey() {
+  const id = contextNodeId.value;
+  const row = rows.value.find((r) => r.nodeId === id && r.type === "node");
+  if (row) await copyText(row.label);
+}
+
+async function copyPath() {
+  const id = contextNodeId.value;
+  if (id === null) return;
+  await copyText(pathToString(await getPath(id)));
+}
+
+async function copyValue() {
+  const id = contextNodeId.value;
+  if (id === null) return;
+  const chunk = await getNodeValue(id, MAX_VALUE_BYTES);
+  await copyText(chunk.text);
+}
+
+// --- Keyboard navigation ---------------------------------------------------
+
+function rowIndex(rowId: string): number {
+  return rows.value.findIndex((r) => r.rowId === rowId);
+}
+
+async function applyNav(rowId: string) {
+  cursorRowId.value = rowId;
+  const row = rows.value.find((r) => r.rowId === rowId);
+  if (row && row.type === "node") selectedId.value = row.nodeId;
+  await nextTick();
+  const i = rowIndex(rowId);
+  if (i >= 0) scrollerRef.value?.scrollToItem?.(i);
+}
+
+async function onKeydown(e: KeyboardEvent) {
+  if (e.key === "/") {
+    if (!searchOpen.value) {
+      searchOpen.value = true;
+      e.preventDefault();
+    }
+    return;
+  }
+  if (e.key === "Escape") {
+    if (searchOpen.value) searchOpen.value = false;
+    else selectedId.value = null;
+    return;
+  }
+  const result = nextAction(rows.value, cursorRowId.value, e.key);
+  if (result.select) await applyNav(result.select);
+  else if (result.toggle) await toggle(result.toggle);
+  else if (result.loadMore) await loadMore(result.loadMore);
+  else return;
+  e.preventDefault();
+}
+
+onMounted(async () => {
   // Deep-linking straight to /explore without an open file: bounce home.
   if (store.phase !== "ready") {
     void router.replace({ name: "open" });
     return;
   }
-  void loadRoot();
+  await loadRoot();
+  if (cursorRowId.value === null && rows.value.length > 0) {
+    cursorRowId.value = rows.value[0].rowId;
+  }
+  treePanel.value?.focus();
 });
 
 async function closeFile() {
@@ -83,28 +177,39 @@ async function closeFile() {
           @select="onSearchSelect"
           @close="searchOpen = false"
         />
-        <RecycleScroller
+        <div
           v-else
-          class="scroller"
-          :items="rows"
-          :item-size="28"
-          key-field="rowId"
+          ref="treePanel"
+          class="tree-focus"
+          tabindex="0"
+          @keydown="onKeydown"
         >
-          <template #default="{ item }">
-            <TreeRow
-              :row="item"
-              :selected="item.type === 'node' && item.nodeId === selectedId"
-              @toggle="toggle"
-              @select="(id: string) => (selectedId = id)"
-              @load-more="loadMore"
-            />
-          </template>
-        </RecycleScroller>
+          <RecycleScroller
+            ref="scrollerRef"
+            class="scroller"
+            :items="rows"
+            :item-size="28"
+            key-field="rowId"
+          >
+            <template #default="{ item }">
+              <TreeRow
+                :row="item"
+                :selected="item.rowId === cursorRowId"
+                @toggle="toggle"
+                @select="onSelect"
+                @load-more="loadMore"
+                @context="onContext"
+              />
+            </template>
+          </RecycleScroller>
+        </div>
       </SplitterPanel>
       <SplitterPanel :size="35" :min-size="20">
         <InspectorPane :node-id="selectedId" />
       </SplitterPanel>
     </Splitter>
+
+    <ContextMenu ref="menuRef" :model="menuItems" />
   </main>
 </template>
 
@@ -163,6 +268,11 @@ async function closeFile() {
 
 .tree-panel {
   overflow: hidden;
+}
+
+.tree-focus {
+  height: 100%;
+  outline: none;
 }
 
 .scroller {

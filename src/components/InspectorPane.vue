@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { getNodeValue, getPath } from "@/api/ipc";
-import type { PathSegment, ValueChunk } from "@/types/json";
+import type { ValueChunk } from "@/types/json";
+import { copyText } from "@/utils/clipboard";
 import { formatBytes } from "@/utils/format";
+import { pathToString } from "@/utils/jsonPath";
 
 const props = defineProps<{ nodeId: string | null }>();
 
@@ -13,20 +15,6 @@ const path = ref("");
 const chunk = ref<ValueChunk | null>(null);
 const loading = ref(false);
 const error = ref<string | null>(null);
-
-const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-function pathToString(segs: PathSegment[]): string {
-  let out = "$";
-  for (const s of segs) {
-    if (s.key !== null) {
-      out += IDENT_RE.test(s.key) ? `.${s.key}` : `[${JSON.stringify(s.key)}]`;
-    } else {
-      out += `[${s.index}]`;
-    }
-  }
-  return out;
-}
 
 async function load(maxBytes?: number) {
   const id = props.nodeId;
@@ -58,14 +46,6 @@ watch(
   },
   { immediate: true },
 );
-
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Clipboard unavailable — nothing sensible to do.
-  }
-}
 </script>
 
 <template>
@@ -83,7 +63,7 @@ async function copy(text: string) {
           severity="secondary"
           title="Copy path"
           :disabled="!path"
-          @click="copy(path)"
+          @click="copyText(path)"
         />
       </div>
 
@@ -98,7 +78,7 @@ async function copy(text: string) {
             text
             severity="secondary"
             title="Copy value"
-            @click="copy(chunk.text)"
+            @click="copyText(chunk.text)"
           />
         </div>
         <Message v-if="chunk.truncated" severity="warn" size="small">

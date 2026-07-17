@@ -8,6 +8,7 @@ const emit = defineEmits<{
   toggle: [nodeId: string];
   select: [nodeId: string];
   loadMore: [nodeId: string];
+  context: [nodeId: string, event: MouseEvent];
 }>();
 
 const KIND_GLYPHS: Record<JsonKind, string> = {
@@ -36,6 +37,11 @@ function onClick() {
 function onCaret() {
   if (isContainer.value) emit("toggle", props.row.nodeId);
 }
+
+function onContext(event: MouseEvent) {
+  if (props.row.type !== "node") return;
+  emit("context", props.row.nodeId, event);
+}
 </script>
 
 <template>
@@ -45,6 +51,7 @@ function onCaret() {
     :style="{ paddingLeft: `${row.depth * 16 + 8}px` }"
     @click="onClick"
     @dblclick="onCaret"
+    @contextmenu.prevent="onContext"
   >
     <template v-if="row.type === 'node'">
       <span class="caret" @click.stop="onCaret">
