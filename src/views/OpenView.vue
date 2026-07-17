@@ -46,7 +46,7 @@ async function browse() {
 <template>
   <main class="open-view">
     <div class="panel">
-      <i class="pi pi-search icon" />
+      <img src="/logo.svg" alt="JSON Explorer" class="logo" width="72" height="72" />
       <h1>JSON Explorer</h1>
       <p class="hint">
         Drop a JSON or NDJSON file anywhere in this window, or browse for one.
@@ -141,9 +141,9 @@ async function browse() {
   padding: 1rem;
 }
 
-.icon {
-  font-size: 2.5rem;
-  color: var(--p-primary-color);
+.logo {
+  border-radius: 16px;
+  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
 }
 
 h1 {

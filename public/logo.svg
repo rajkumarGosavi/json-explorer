@@ -1,0 +1,18 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="JSON Explorer">
+  <defs>
+    <linearGradient id="jexBg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#jexBg)"/>
+  <g stroke="#FFFFFF" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M200 100 C168 100 168 130 168 168 C168 210 168 232 118 256 C168 280 168 302 168 344 C168 382 168 412 200 412"/>
+    <path d="M312 100 C344 100 344 130 344 168 C344 210 344 232 394 256 C344 280 344 302 344 344 C344 382 344 412 312 412"/>
+  </g>
+  <g fill="#FFFFFF">
+    <circle cx="256" cy="168" r="24"/>
+    <circle cx="256" cy="256" r="24"/>
+    <circle cx="256" cy="344" r="24"/>
+  </g>
+</svg>
