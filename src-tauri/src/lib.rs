@@ -11,6 +11,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::open_file,
+            commands::open_text,
             commands::get_root,
             commands::get_children,
             commands::get_node_value,

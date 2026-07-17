@@ -5,12 +5,31 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
-/// One open file. `mmap` and `index` are `Arc`-wrapped so a background
+/// The raw bytes an open document is indexed against. A file opened from disk
+/// is memory-mapped (`Mapped`); JSON pasted into the app has no backing file
+/// and is held in memory (`Owned`). Both deref to `&[u8]`, so every command
+/// that scans the buffer is agnostic to which it is.
+pub enum Source {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for Source {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Source::Mapped(m) => m,
+            Source::Owned(v) => v,
+        }
+    }
+}
+
+/// One open document. `buf` and `index` are `Arc`-wrapped so a background
 /// indexing/search thread can hold its own handle without borrowing the
-/// session lock — dropping the last Arc releases the mapping and index
-/// memory (see [[memory_safety_no_leaks]] in the plan).
+/// session lock — dropping the last Arc releases the mapping (or owned bytes)
+/// and index memory (see [[memory_safety_no_leaks]] in the plan).
 pub struct Session {
-    pub mmap: Arc<Mmap>,
+    pub buf: Arc<Source>,
     pub index: Arc<StructuralIndex>,
     /// Kept for future "current file" display / reopen; not read yet.
     #[allow(dead_code)]
@@ -47,7 +66,9 @@ mod tests {
 
     fn dummy_session() -> Session {
         Session {
-            mmap: Arc::new(memmap2::MmapMut::map_anon(4).unwrap().make_read_only().unwrap()),
+            buf: Arc::new(Source::Mapped(
+                memmap2::MmapMut::map_anon(4).unwrap().make_read_only().unwrap(),
+            )),
             index: Arc::new(StructuralIndex::default()),
             path: PathBuf::from("test.json"),
             search_generation: Arc::new(AtomicU64::new(0)),
@@ -66,7 +87,7 @@ mod tests {
         let state = AppState::default();
         let first = dummy_session();
         let first_cancel = first.search_cancel.clone();
-        let first_mmap = Arc::downgrade(&first.mmap);
+        let first_mmap = Arc::downgrade(&first.buf);
         state.replace_session(Some(first));
         assert!(!first_cancel.load(Ordering::SeqCst));
 

@@ -19,6 +19,11 @@ export function openFile(path: string): Promise<void> {
   return invoke("open_file", { path });
 }
 
+/** Index JSON pasted into the app (held in memory, no backing file). */
+export function openText(text: string): Promise<void> {
+  return invoke("open_text", { text });
+}
+
 export function getRoot(): Promise<NodeSummary> {
   return invoke("get_root");
 }

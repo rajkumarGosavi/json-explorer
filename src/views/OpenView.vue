@@ -8,7 +8,14 @@ import { formatBytes } from "@/utils/format";
 const store = useFileStore();
 const router = useRouter();
 const dragActive = ref(false);
+const showPaste = ref(false);
+const pasteText = ref("");
 let unlisten: (() => void) | null = null;
+
+function explorePasted() {
+  const text = pasteText.value.trim();
+  if (text) void store.openText(text);
+}
 
 onMounted(async () => {
   await store.init();
@@ -45,12 +52,39 @@ async function browse() {
         Drop a JSON or NDJSON file anywhere in this window, or browse for one.
         Files are indexed in place — even multi-gigabyte files open quickly.
       </p>
-      <Button
-        label="Open file…"
-        icon="pi pi-folder-open"
-        :disabled="store.phase === 'indexing'"
-        @click="browse"
-      />
+      <div class="open-actions">
+        <Button
+          label="Open file…"
+          icon="pi pi-folder-open"
+          :disabled="store.phase === 'indexing'"
+          @click="browse"
+        />
+        <Button
+          :label="showPaste ? 'Hide paste' : 'Paste JSON…'"
+          icon="pi pi-clipboard"
+          severity="secondary"
+          outlined
+          :disabled="store.phase === 'indexing'"
+          @click="showPaste = !showPaste"
+        />
+      </div>
+
+      <div v-if="showPaste" class="paste">
+        <Textarea
+          v-model="pasteText"
+          class="paste-box mono"
+          placeholder='Paste JSON or NDJSON here, e.g. {"hello": "world"}'
+          :rows="8"
+          spellcheck="false"
+          autofocus
+        />
+        <Button
+          label="Explore pasted JSON"
+          icon="pi pi-arrow-right"
+          :disabled="store.phase === 'indexing' || pasteText.trim().length === 0"
+          @click="explorePasted"
+        />
+      </div>
 
       <div v-if="store.phase === 'indexing'" class="progress">
         <ProgressBar
@@ -119,6 +153,28 @@ h1 {
 .hint {
   margin: 0 0 0.5rem;
   color: var(--p-text-muted-color);
+}
+
+.open-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.paste {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.paste-box {
+  width: 100%;
+  resize: vertical;
+  font-size: 0.85rem;
 }
 
 .progress {

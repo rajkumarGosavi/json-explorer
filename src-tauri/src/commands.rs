@@ -2,7 +2,7 @@ use crate::dto::{
     decode_node, encode_node, FileMeta, IndexErrorDto, IndexProgress, NodeSummary, PathSegment,
     SearchHitDto, ValueChunk,
 };
-use crate::state::{AppState, Session};
+use crate::state::{AppState, Session, Source};
 use json_index::{
     build_index_with_progress, leaf_value_end, peek_scalar_kind, search_bytes, IndexError,
     JsonKind, NodeRef, RootKind, NO_PARENT,
@@ -20,14 +20,35 @@ const MAX_CHILDREN_PAGE: u32 = 200;
 const DEFAULT_VALUE_CAP: u64 = 64 * 1024;
 const MAX_VALUE_CAP: u64 = 1024 * 1024;
 
+/// Label shown for pasted JSON, which has no backing file path.
+const PASTED_LABEL: &str = "(pasted JSON)";
+
 #[tauri::command]
 pub async fn open_file(path: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let file = File::open(&path).map_err(|e| format!("could not open file: {e}"))?;
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("could not map file: {e}"))?;
-    let mmap = Arc::new(mmap);
-    let size = mmap.len() as u64;
+    spawn_indexing(Arc::new(Source::Mapped(mmap)), path, app, &state);
+    Ok(())
+}
 
-    // Clear any previously open file immediately; the new session is only
+#[tauri::command]
+pub async fn open_text(text: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    spawn_indexing(
+        Arc::new(Source::Owned(text.into_bytes())),
+        PASTED_LABEL.to_string(),
+        app,
+        &state,
+    );
+    Ok(())
+}
+
+/// Kick off indexing of `buf` on a background thread, emitting
+/// `index://progress`/`done`/`error` events. `label` is the display name
+/// (a file path, or `PASTED_LABEL`). Shared by `open_file` and `open_text`.
+fn spawn_indexing(buf: Arc<Source>, label: String, app: AppHandle, state: &AppState) {
+    let size = buf.len() as u64;
+
+    // Clear any previously open document immediately; the new session is only
     // published to AppState once indexing finishes (see below), so the
     // frontend must wait for `index://done`/`index://error` before issuing
     // get_root/get_children.
@@ -40,7 +61,7 @@ pub async fn open_file(path: String, app: AppHandle, state: State<'_, AppState>)
         let app_state = app_for_thread.state::<AppState>();
         let mut last_reported = 0u64;
         let start = Instant::now();
-        let result = build_index_with_progress(&mmap, &mut |pos| {
+        let result = build_index_with_progress(&buf, &mut |pos| {
             if pos.saturating_sub(last_reported) >= PROGRESS_STEP_BYTES {
                 last_reported = pos;
                 let _ = app_for_thread.emit(
@@ -58,9 +79,9 @@ pub async fn open_file(path: String, app: AppHandle, state: State<'_, AppState>)
                 let container_count = index.container_count() as u64;
                 let multi_doc = matches!(index.root, RootKind::MultiDoc { .. });
                 let session = Session {
-                    mmap: mmap.clone(),
+                    buf: buf.clone(),
                     index: Arc::new(index),
-                    path: PathBuf::from(&path),
+                    path: PathBuf::from(&label),
                     search_generation: Arc::new(AtomicU64::new(0)),
                     search_cancel: Arc::new(AtomicBool::new(false)),
                 };
@@ -68,7 +89,7 @@ pub async fn open_file(path: String, app: AppHandle, state: State<'_, AppState>)
                 let _ = app_for_thread.emit(
                     "index://done",
                     FileMeta {
-                        path,
+                        path: label,
                         size_bytes: size.to_string(),
                         container_count,
                         multi_doc,
@@ -90,7 +111,7 @@ pub async fn open_file(path: String, app: AppHandle, state: State<'_, AppState>)
                         col,
                     },
                     IndexError::Empty => IndexErrorDto {
-                        message: "file is empty or contains only whitespace".into(),
+                        message: "input is empty or contains only whitespace".into(),
                         byte_offset: "0".into(),
                         line: 1,
                         col: 1,
@@ -100,15 +121,13 @@ pub async fn open_file(path: String, app: AppHandle, state: State<'_, AppState>)
             }
         }
     });
-
-    Ok(())
 }
 
 #[tauri::command]
 pub fn get_root(state: State<'_, AppState>) -> Result<NodeSummary, String> {
     let guard = state.session.read();
     let session = guard.as_ref().ok_or("no file open")?;
-    let buf: &[u8] = &session.mmap;
+    let buf: &[u8] = &session.buf;
     let index = &session.index;
 
     let summary = match &index.root {
@@ -156,7 +175,7 @@ pub fn get_children(
 ) -> Result<Vec<NodeSummary>, String> {
     let guard = state.session.read();
     let session = guard.as_ref().ok_or("no file open")?;
-    let buf: &[u8] = &session.mmap;
+    let buf: &[u8] = &session.buf;
     let index = &session.index;
     let node_ref = decode_node(&node)?;
     let limit = limit.min(MAX_CHILDREN_PAGE);
@@ -215,7 +234,7 @@ pub fn get_node_value(
 ) -> Result<ValueChunk, String> {
     let guard = state.session.read();
     let session = guard.as_ref().ok_or("no file open")?;
-    let buf: &[u8] = &session.mmap;
+    let buf: &[u8] = &session.buf;
     let index = &session.index;
     let node_ref = decode_node(&node)?;
     let cap = (max_bytes.unwrap_or(DEFAULT_VALUE_CAP as u32) as u64).min(MAX_VALUE_CAP);
@@ -263,7 +282,7 @@ pub fn get_node_value(
 pub fn get_path(node: String, state: State<'_, AppState>) -> Result<Vec<PathSegment>, String> {
     let guard = state.session.read();
     let session = guard.as_ref().ok_or("no file open")?;
-    let buf: &[u8] = &session.mmap;
+    let buf: &[u8] = &session.buf;
     let index = &session.index;
     let node_ref = decode_node(&node)?;
     Ok(index.path_of(buf, node_ref).iter().map(PathSegment::from).collect())
@@ -277,13 +296,13 @@ pub fn search_start(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let (mmap, index, generation, cancel, search_id) = {
+    let (buf, index, generation, cancel, search_id) = {
         let guard = state.session.read();
         let session = guard.as_ref().ok_or("no file open")?;
         session.search_cancel.store(false, Ordering::SeqCst);
         let generation = session.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
         (
-            session.mmap.clone(),
+            session.buf.clone(),
             session.index.clone(),
             session.search_generation.clone(),
             session.search_cancel.clone(),
@@ -299,7 +318,7 @@ pub fn search_start(
             }
         };
 
-        let (total, truncated) = search_bytes(&mmap, &index, &query, regex, case_sensitive, |hit| {
+        let (total, truncated) = search_bytes(&buf, &index, &query, regex, case_sensitive, |hit| {
             if cancel.load(Ordering::SeqCst) || generation.load(Ordering::SeqCst) != search_id {
                 return false;
             }

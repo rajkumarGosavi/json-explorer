@@ -21,6 +21,7 @@ declare module 'vue' {
     Splitter: typeof import('primevue/splitter')['default']
     SplitterPanel: typeof import('primevue/splitterpanel')['default']
     Tag: typeof import('primevue/tag')['default']
+    Textarea: typeof import('primevue/textarea')['default']
     Toast: typeof import('primevue/toast')['default']
     TreeRow: typeof import('./components/TreeRow.vue')['default']
     VirtualScroller: typeof import('primevue/virtualscroller')['default']

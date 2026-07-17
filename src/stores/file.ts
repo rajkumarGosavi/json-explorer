@@ -71,6 +71,25 @@ export const useFileStore = defineStore("file", {
       }
     },
 
+    /** Index JSON pasted directly, sharing the same index:// event lifecycle. */
+    async openText(text: string) {
+      await this.init();
+      this.$patch({
+        phase: "indexing",
+        path: "(pasted JSON)",
+        meta: null,
+        error: null,
+        bytesDone: 0,
+        bytesTotal: 0,
+      });
+      try {
+        await ipc.openText(text);
+      } catch (e) {
+        this.phase = "error";
+        this.error = { message: String(e), byteOffset: "0", line: 0, col: 0 };
+      }
+    },
+
     async close() {
       await ipc.closeFile();
       this.$patch({
