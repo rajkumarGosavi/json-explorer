@@ -15,6 +15,7 @@ pub fn run() {
             commands::get_root,
             commands::get_children,
             commands::get_node_value,
+            commands::get_node_stats,
             commands::get_path,
             commands::search_start,
             commands::search_cancel,

@@ -110,6 +110,41 @@ pub struct ValueChunk {
     pub total_bytes: String,
 }
 
+/// Count of a container's direct children by JSON kind.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KindCounts {
+    pub object: u64,
+    pub array: u64,
+    pub string: u64,
+    pub number: u64,
+    pub bool: u64,
+    pub null: u64,
+}
+
+impl KindCounts {
+    pub fn add(&mut self, kind: CoreKind) {
+        match kind {
+            CoreKind::Object => self.object += 1,
+            CoreKind::Array => self.array += 1,
+            CoreKind::String => self.string += 1,
+            CoreKind::Number => self.number += 1,
+            CoreKind::Bool => self.bool += 1,
+            CoreKind::Null => self.null += 1,
+        }
+    }
+}
+
+/// Aggregate stats for a node: direct-child count, byte span, and a histogram
+/// of direct children by kind (all zero for a leaf).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeStats {
+    pub child_count: u64,
+    pub byte_size: String,
+    pub kind_counts: KindCounts,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexProgress {

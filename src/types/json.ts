@@ -48,6 +48,21 @@ export interface ValueChunk {
   totalBytes: string;
 }
 
+export interface KindCounts {
+  object: number;
+  array: number;
+  string: number;
+  number: number;
+  bool: number;
+  null: number;
+}
+
+export interface NodeStats {
+  childCount: number;
+  byteSize: string;
+  kindCounts: KindCounts;
+}
+
 export interface IndexProgress {
   bytesDone: string;
   bytesTotal: string;

@@ -1,6 +1,6 @@
 use crate::dto::{
-    decode_node, encode_node, FileMeta, IndexErrorDto, IndexProgress, NodeSummary, PathSegment,
-    SearchHitDto, ValueChunk,
+    decode_node, encode_node, FileMeta, IndexErrorDto, IndexProgress, KindCounts, NodeStats,
+    NodeSummary, PathSegment, SearchHitDto, ValueChunk,
 };
 use crate::state::{AppState, Session, Source};
 use json_index::{
@@ -17,6 +17,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const PROGRESS_STEP_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CHILDREN_PAGE: u32 = 200;
+/// Above this direct-child count, skip the per-kind histogram in get_node_stats
+/// (child count + byte size are still exact) so selecting a giant container
+/// stays instant instead of scanning millions of entries.
+const STATS_KIND_CAP: u64 = 50_000;
 const DEFAULT_VALUE_CAP: u64 = 64 * 1024;
 const MAX_VALUE_CAP: u64 = 1024 * 1024;
 
@@ -275,6 +279,74 @@ pub fn get_node_value(
         text,
         truncated,
         total_bytes: total.to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn get_node_stats(node: String, state: State<'_, AppState>) -> Result<NodeStats, String> {
+    let guard = state.session.read();
+    let session = guard.as_ref().ok_or("no file open")?;
+    let buf: &[u8] = &session.buf;
+    let index = &session.index;
+    let node_ref = decode_node(&node)?;
+    let mut counts = KindCounts::default();
+
+    let (child_count, byte_size) = match node_ref {
+        NodeRef::Container(id) => {
+            let total = index.child_count_of(id);
+            let mut offset = 0u64;
+            while offset < total && total <= STATS_KIND_CAP {
+                let page = index.children(buf, id, offset, MAX_CHILDREN_PAGE);
+                if page.is_empty() {
+                    break;
+                }
+                for c in &page {
+                    counts.add(c.kind);
+                }
+                offset += page.len() as u64;
+            }
+            let (s, e) = index.bounds(id);
+            (total, e - s)
+        }
+        NodeRef::Root => match &index.root {
+            RootKind::MultiDoc { doc_refs, doc_starts } => {
+                if doc_refs.len() as u64 <= STATS_KIND_CAP {
+                    for (i, r) in doc_refs.iter().enumerate() {
+                        let kind = match r {
+                            NodeRef::Container(cid) => index.kind_of_container(*cid),
+                            _ => peek_scalar_kind(buf, doc_starts[i]),
+                        };
+                        counts.add(kind);
+                    }
+                }
+                (doc_refs.len() as u64, buf.len() as u64)
+            }
+            _ => {
+                let mut start = 0usize;
+                while start < buf.len() && buf[start].is_ascii_whitespace() {
+                    start += 1;
+                }
+                (0, leaf_value_end(buf, start as u64) - start as u64)
+            }
+        },
+        NodeRef::Leaf { parent, child_idx } if parent != NO_PARENT => {
+            let kids = index.children(buf, parent, child_idx as u64, 1);
+            let size = kids.first().map(|c| c.value_end - c.value_start).unwrap_or(0);
+            (0, size)
+        }
+        NodeRef::Leaf { child_idx, .. } => match &index.root {
+            RootKind::MultiDoc { doc_starts, .. } => {
+                let start = doc_starts.get(child_idx as usize).copied().unwrap_or(0);
+                (0, leaf_value_end(buf, start) - start)
+            }
+            _ => (0, 0),
+        },
+    };
+
+    Ok(NodeStats {
+        child_count,
+        byte_size: byte_size.to_string(),
+        kind_counts: counts,
     })
 }
 

@@ -537,3 +537,28 @@ fn search_scope_keys_vs_values() {
     assert_eq!(values, 1);
     assert!(vh[0].byte_offset > 6, "value hit should be past the key");
 }
+
+#[test]
+fn child_kinds_and_bounds_back_node_stats() {
+    // One direct child of every kind, in a known order. This is exactly what
+    // the get_node_stats command iterates to build its histogram + byte size.
+    let buf = br#"{"o":{},"a":[],"s":"x","n":1,"b":true,"z":null}"#;
+    let idx = build_index(buf).unwrap();
+    let root = 0u32; // the root object is the first container scanned
+    let kids = idx.children(buf, root, 0, idx.child_count_of(root) as u32);
+    let kinds: Vec<_> = kids.iter().map(|c| c.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            JsonKind::Object,
+            JsonKind::Array,
+            JsonKind::String,
+            JsonKind::Number,
+            JsonKind::Bool,
+            JsonKind::Null,
+        ]
+    );
+    let (start, end) = idx.bounds(root);
+    assert_eq!(start, 0);
+    assert_eq!(end as usize, buf.len()); // byte_size spans the whole object
+}

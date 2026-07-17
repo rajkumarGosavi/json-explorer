@@ -9,6 +9,7 @@ import type {
   FileMeta,
   IndexError,
   IndexProgress,
+  NodeStats,
   NodeSummary,
   PathSegment,
   SearchHit,
@@ -45,6 +46,10 @@ export function getNodeValue(
 
 export function getPath(node: string): Promise<PathSegment[]> {
   return invoke("get_path", { node });
+}
+
+export function getNodeStats(node: string): Promise<NodeStats> {
+  return invoke("get_node_stats", { node });
 }
 
 export type SearchTarget = "both" | "keys" | "values";
