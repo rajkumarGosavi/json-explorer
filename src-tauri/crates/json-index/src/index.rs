@@ -101,18 +101,42 @@ impl Default for RootKind {
     }
 }
 
+/// Sentinel `parent` value meaning "no container parent" (root-level
+/// container). Stored in `parents` instead of a signed -1 so the array can be
+/// `u32`, not `i64` — halving its footprint. `u32::MAX` can never be a real
+/// container id: ids are dense `0..container_count`, and reaching 4 billion
+/// containers would require a >4 GB file of nothing but empty containers.
+const NO_CONTAINER_PARENT: u32 = u32::MAX;
+
 /// Flat struct-of-arrays: one entry per container (object/array), in the
 /// order they were opened during the scan.
+///
+/// Widths are deliberately minimal: `parents`/`child_count` are `u32` because
+/// container ids and child indices are already capped at `u32` everywhere
+/// (see `NodeRef`). Checkpoints use a flat CSR layout rather than a
+/// `Vec<Vec<u64>>` — a per-container inner `Vec` costs 24 bytes of header
+/// each plus its own heap allocation, which on a file with millions of small
+/// containers dominated the index (millions of tiny allocations, hundreds of
+/// MB). The CSR store is two flat allocations regardless of container count.
 #[derive(Debug, Default)]
 pub struct StructuralIndex {
     starts: Vec<u64>,       // byte offset of '{' or '['
     is_object: Vec<bool>,
     ends: Vec<u64>,         // byte offset one past matching '}' / ']'
-    parents: Vec<i64>,      // container id of parent, -1 for root-level
-    child_count: Vec<u64>,  // number of direct children
-    // checkpoints[i] holds byte offsets of every CHECKPOINT_STRIDE-th direct
-    // child of container i, in child order (first checkpoint = child 0).
-    checkpoints: Vec<Vec<u64>>,
+    parents: Vec<u32>,      // container id of parent, NO_CONTAINER_PARENT for root-level
+    child_count: Vec<u32>,  // number of direct children
+    // CSR checkpoint store (populated by `finalize_checkpoints`): the
+    // checkpoints of container `c` are
+    // `checkpoint_data[ckpt_index[c]..ckpt_index[c + 1]]`, each the byte
+    // offset of every CHECKPOINT_STRIDE-th direct child in child order
+    // (first entry = child 0). `ckpt_index` has `container_count + 1` entries.
+    checkpoint_data: Vec<u64>,
+    ckpt_index: Vec<u32>,
+    // Build-time scratch: `(container, child_offset)` for every checkpoint, in
+    // scan order (interleaved across containers). Compacted into the CSR
+    // arrays above by `finalize_checkpoints`, then freed.
+    build_ckpt_owner: Vec<u32>,
+    build_ckpt_offset: Vec<u64>,
     pub root: RootKind,
 }
 
@@ -127,9 +151,9 @@ impl StructuralIndex {
         self.starts.push(start);
         self.is_object.push(is_object);
         self.ends.push(0);
-        self.parents.push(parent);
+        self.parents
+            .push(if parent < 0 { NO_CONTAINER_PARENT } else { parent as u32 });
         self.child_count.push(0);
-        self.checkpoints.push(Vec::new());
         id
     }
 
@@ -139,10 +163,47 @@ impl StructuralIndex {
 
     pub(crate) fn note_child(&mut self, container: u32, child_start: u64) {
         let idx = self.child_count[container as usize];
-        if idx.is_multiple_of(CHECKPOINT_STRIDE) {
-            self.checkpoints[container as usize].push(child_start);
+        if idx.is_multiple_of(CHECKPOINT_STRIDE as u32) {
+            self.build_ckpt_owner.push(container);
+            self.build_ckpt_offset.push(child_start);
         }
         self.child_count[container as usize] = idx + 1;
+    }
+
+    /// Compact the scan-order checkpoint scratch into the CSR store. Called
+    /// once after scanning completes (see `scanner::build_index_with_progress`),
+    /// before the index serves any query. A counting sort groups checkpoints
+    /// by owning container; within a container, scan order already equals child
+    /// order (`note_child` fires in increasing child index), and the forward
+    /// scatter below preserves that, so `checkpoint_data[ckpt_index[c] + j]` is
+    /// container `c`'s `j`-th checkpoint — identical to the old `checkpoints[c][j]`.
+    pub(crate) fn finalize_checkpoints(&mut self) {
+        let n = self.starts.len();
+        let mut index = vec![0u32; n + 1];
+        for &c in &self.build_ckpt_owner {
+            index[c as usize + 1] += 1;
+        }
+        for i in 0..n {
+            index[i + 1] += index[i];
+        }
+        let mut data = vec![0u64; index[n] as usize];
+        let mut cursor = index.clone(); // per-container moving write head
+        for (k, &c) in self.build_ckpt_owner.iter().enumerate() {
+            let w = cursor[c as usize] as usize;
+            data[w] = self.build_ckpt_offset[k];
+            cursor[c as usize] += 1;
+        }
+        self.checkpoint_data = data;
+        self.ckpt_index = index;
+        self.build_ckpt_owner = Vec::new();
+        self.build_ckpt_offset = Vec::new();
+    }
+
+    /// Checkpoints of `container`, in child order — see `checkpoint_data`.
+    fn checkpoints_of(&self, container: u32) -> &[u64] {
+        let s = self.ckpt_index[container as usize] as usize;
+        let e = self.ckpt_index[container as usize + 1] as usize;
+        &self.checkpoint_data[s..e]
     }
 
     pub fn container_count(&self) -> usize {
@@ -166,22 +227,20 @@ impl StructuralIndex {
     }
 
     pub fn child_count_of(&self, id: u32) -> u64 {
-        self.child_count[id as usize]
+        self.child_count[id as usize] as u64
     }
 
     pub fn parent_of(&self, id: u32) -> Option<u32> {
-        let p = self.parents[id as usize];
-        if p < 0 {
-            None
-        } else {
-            Some(p as u32)
+        match self.parents[id as usize] {
+            NO_CONTAINER_PARENT => None,
+            p => Some(p),
         }
     }
 
     /// Nearest checkpoint at or before the requested child offset. Returns
     /// (checkpoint_child_index, byte_offset_of_that_child).
     fn nearest_checkpoint(&self, container: u32, offset: u64) -> (u64, u64) {
-        let ckpts = &self.checkpoints[container as usize];
+        let ckpts = self.checkpoints_of(container);
         let ckpt_idx = (offset / CHECKPOINT_STRIDE) as usize;
         let ckpt_idx = ckpt_idx.min(ckpts.len().saturating_sub(1));
         (
@@ -322,7 +381,7 @@ impl StructuralIndex {
     fn child_index_of(&self, buf: &[u8], parent: u32, target: u32) -> u64 {
         let target_start = self.starts[target as usize];
         // Binary-search-ish via checkpoints, then linear scan from there.
-        let ckpts = &self.checkpoints[parent as usize];
+        let ckpts = self.checkpoints_of(parent);
         let mut lo = 0usize;
         for (i, &b) in ckpts.iter().enumerate() {
             if b <= target_start {

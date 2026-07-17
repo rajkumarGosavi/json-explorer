@@ -13,3 +13,11 @@ thiserror = "2"
 [dev-dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
 memmap2 = "0.9"
+criterion = "0.5"
+dhat = "0.3"
+
+# Statistical build+search benchmark. Run: cargo bench -p json-index
+# Set BENCH_FILE=<path> to point at a fixture (see gen_fixture example).
+[[bench]]
+name = "index_search"
+harness = false

@@ -36,6 +36,7 @@ pub fn build_index_with_progress(
     skip_ws(buf, &mut pos);
     if pos >= buf.len() {
         index.root = RootKind::Single(first_ref);
+        index.finalize_checkpoints();
         return Ok(index);
     }
 
@@ -58,6 +59,7 @@ pub fn build_index_with_progress(
         }
     }
     index.root = RootKind::MultiDoc { doc_starts, doc_refs };
+    index.finalize_checkpoints();
     Ok(index)
 }
 

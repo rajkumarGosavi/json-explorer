@@ -24,3 +24,7 @@ dist-ssr
 *.sw?
 
 **samples
+
+# Profiler / load-test output (see scripts/profile-app.ps1, examples/mem_index.rs)
+dhat-heap.json
+app-profile.csv
