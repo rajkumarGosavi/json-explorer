@@ -47,12 +47,15 @@ export function getPath(node: string): Promise<PathSegment[]> {
   return invoke("get_path", { node });
 }
 
+export type SearchTarget = "both" | "keys" | "values";
+
 export function searchStart(
   query: string,
   regex: boolean,
   caseSensitive: boolean,
+  target: SearchTarget = "both",
 ): Promise<string> {
-  return invoke("search_start", { query, regex, caseSensitive });
+  return invoke("search_start", { query, regex, caseSensitive, target });
 }
 
 export function searchCancel(): Promise<void> {

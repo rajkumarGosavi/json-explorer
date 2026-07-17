@@ -113,4 +113,24 @@ describe("useTree", () => {
     expect(tree.error.value).toContain("no file open");
     expect(tree.rows.value).toHaveLength(0);
   });
+
+  it("expandToPath expands ancestors and pages an array to a deep index", async () => {
+    const tree = useTree();
+    await tree.loadRoot();
+    const id = await tree.expandToPath([
+      { key: "items", index: 0 },
+      { key: null, index: 250 },
+    ]);
+    expect(id).toBe("item-250");
+    // reaching index 250 requires paging past the first 200-element page
+    expect(mocks.getChildren).toHaveBeenCalledWith("2", 200, PAGE_SIZE);
+    // the target is now visible in the flattened rows
+    expect(tree.rows.value.some((r) => r.rowId === "item-250")).toBe(true);
+  });
+
+  it("expandToPath returns null for a missing key", async () => {
+    const tree = useTree();
+    await tree.loadRoot();
+    expect(await tree.expandToPath([{ key: "nope", index: 0 }])).toBeNull();
+  });
 });

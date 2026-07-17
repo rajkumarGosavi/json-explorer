@@ -497,3 +497,43 @@ fn verify_against_oracle(
         _ => {}
     }
 }
+
+#[test]
+fn classify_offset_distinguishes_key_and_value() {
+    use crate::index::OffsetRole;
+    // bytes: {"cat":"cat food"}  — key "cat" quoted at 1..6, value string at 7..17
+    let buf = br#"{"cat":"cat food"}"#;
+    let idx = build_index(buf).unwrap();
+    assert_eq!(idx.classify_offset(buf, 3), OffsetRole::Key); // inside the key
+    assert_eq!(idx.classify_offset(buf, 9), OffsetRole::Value); // inside the value
+    // Array elements have no keys — always Value.
+    let arr = build_index(b"[1,2,3]").unwrap();
+    assert_eq!(arr.classify_offset(b"[1,2,3]", 1), OffsetRole::Value);
+}
+
+#[test]
+fn search_scope_keys_vs_values() {
+    use crate::search::{search_scoped, SearchTarget};
+    // "cat" appears once in a key and once in a value.
+    let buf = br#"{"cat":"cat food","dog":"bark"}"#;
+    let idx = build_index(buf).unwrap();
+
+    let run = |target| {
+        let mut hits = Vec::new();
+        let (count, _) = search_scoped(buf, &idx, "cat", false, true, target, |h| {
+            hits.push(h);
+            true
+        });
+        (count, hits)
+    };
+
+    assert_eq!(run(SearchTarget::Both).0, 2);
+
+    let (keys, kh) = run(SearchTarget::Keys);
+    assert_eq!(keys, 1);
+    assert!(kh[0].byte_offset < 6, "key hit should be in the key span");
+
+    let (values, vh) = run(SearchTarget::Values);
+    assert_eq!(values, 1);
+    assert!(vh[0].byte_offset > 6, "value hit should be past the key");
+}

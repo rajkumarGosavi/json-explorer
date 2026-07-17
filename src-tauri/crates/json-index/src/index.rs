@@ -537,6 +537,74 @@ impl StructuralIndex {
     }
 }
 
+/// Whether a byte offset falls inside an object entry's key string or inside a
+/// value. Used to scope search to keys vs values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetRole {
+    Key,
+    Value,
+}
+
+impl StructuralIndex {
+    /// Classify a byte offset as landing in an object key or in a value.
+    /// Array elements and root-level scalars are always `Value` (no keys).
+    /// Structural bytes (`:`, whitespace) default to `Value` — they rarely
+    /// match a user query and never need to count as a key hit.
+    ///
+    /// Runs once per search hit (not per frame), and starts scanning from the
+    /// nearest checkpoint at or before `off`, so cost is bounded by
+    /// `CHECKPOINT_STRIDE` entries regardless of container size.
+    pub fn classify_offset(&self, buf: &[u8], off: u64) -> OffsetRole {
+        let Some(container) = self.innermost_container_at(off) else {
+            return OffsetRole::Value;
+        };
+        if !self.is_object(container) {
+            return OffsetRole::Value;
+        }
+        let mut pos = self
+            .checkpoints_of(container)
+            .iter()
+            .copied()
+            .take_while(|&b| b <= off)
+            .last()
+            .unwrap_or(self.starts[container as usize] + 1) as usize;
+        let end = self.bounds(container).1 as usize;
+        let off = off as usize;
+        skip_ws(buf, &mut pos);
+        while pos < end {
+            if buf.get(pos) != Some(&b'"') {
+                break;
+            }
+            let key_start = pos;
+            skip_string(buf, &mut pos);
+            if off >= key_start && off < pos {
+                return OffsetRole::Key;
+            }
+            skip_ws(buf, &mut pos);
+            if buf.get(pos) == Some(&b':') {
+                pos += 1;
+            }
+            skip_ws(buf, &mut pos);
+            let value_start = pos;
+            if off < value_start {
+                return OffsetRole::Value; // in the `:`/whitespace gap
+            }
+            skip_entry(buf, &mut pos, false);
+            if off < pos {
+                return OffsetRole::Value; // inside this entry's value
+            }
+            skip_ws(buf, &mut pos);
+            if buf.get(pos) == Some(&b',') {
+                pos += 1;
+                skip_ws(buf, &mut pos);
+            } else {
+                break;
+            }
+        }
+        OffsetRole::Value
+    }
+}
+
 /// End offset of the leaf value starting at `start` (a non-container node
 /// has no stored bounds — its range is recovered on demand, same principle
 /// as `children()` for object/array entries).

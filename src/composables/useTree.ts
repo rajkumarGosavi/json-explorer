@@ -3,7 +3,7 @@
 // have millions of children, so nothing is ever loaded eagerly.
 import { computed, reactive, ref } from "vue";
 import { getChildren, getRoot } from "@/api/ipc";
-import type { NodeSummary } from "@/types/json";
+import type { NodeSummary, PathSegment } from "@/types/json";
 
 export const PAGE_SIZE = 200;
 
@@ -101,6 +101,54 @@ export function useTree() {
     if (entry.children === null) await loadMore(id);
   }
 
+  /** Resolve one path segment to a child id under `parentId`, paging the
+   * parent's children as needed (by key for objects, by index for arrays).
+   * Returns null if the child doesn't exist. */
+  async function findChild(
+    parentId: string,
+    seg: PathSegment,
+  ): Promise<string | null> {
+    const parent = entries.get(parentId);
+    if (!parent) return null;
+    if (seg.key !== null) {
+      for (;;) {
+        const children = parent.children ?? [];
+        for (const cid of children) {
+          if (entries.get(cid)?.summary.key === seg.key) return cid;
+        }
+        const before = children.length;
+        if (before >= parent.summary.childCount) return null;
+        await loadMore(parentId);
+        if ((parent.children?.length ?? 0) === before) return null; // no progress
+      }
+    }
+    const target = seg.index;
+    for (;;) {
+      const len = parent.children?.length ?? 0;
+      if (len > target || len >= parent.summary.childCount) break;
+      await loadMore(parentId);
+      if ((parent.children?.length ?? 0) === len) break; // no progress
+    }
+    return parent.children?.[target] ?? null;
+  }
+
+  /** Expand every ancestor along `segs` from the root and return the target
+   * node id (or null if the path doesn't resolve). Makes the node visible in
+   * `rows` so callers can select and scroll to it. */
+  async function expandToPath(segs: PathSegment[]): Promise<string | null> {
+    let currentId = rootId.value;
+    if (currentId === null) return null;
+    for (const seg of segs) {
+      const entry = entries.get(currentId);
+      if (!entry || !isExpandable(entry.summary)) return null;
+      if (!entry.expanded) await toggle(currentId);
+      const childId = await findChild(currentId, seg);
+      if (childId === null) return null;
+      currentId = childId;
+    }
+    return currentId;
+  }
+
   const rows = computed<TreeRowModel[]>(() => {
     const out: TreeRowModel[] = [];
     const rid = rootId.value;
@@ -141,5 +189,5 @@ export function useTree() {
     return out;
   });
 
-  return { rows, error, loadRoot, toggle, loadMore };
+  return { rows, error, loadRoot, toggle, loadMore, expandToPath };
 }

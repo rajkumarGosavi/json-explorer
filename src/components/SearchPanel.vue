@@ -15,23 +15,38 @@ const {
   query,
   regex,
   caseSensitive,
+  target,
   hits,
   searching,
   total,
   truncated,
   error,
+  currentIndex,
+  next,
+  prev,
   run,
   cancel,
 } = useSearch();
 
 let debounceHandle: ReturnType<typeof setTimeout> | undefined;
-watch([query, regex, caseSensitive], () => {
+watch([query, regex, caseSensitive, target], () => {
   clearTimeout(debounceHandle);
   debounceHandle = setTimeout(() => void run(), 250);
 });
 
 function onSelect(hit: SearchHit) {
+  currentIndex.value = hits.value.indexOf(hit);
   emit("select", hit.nodeId);
+}
+
+function goNext() {
+  const hit = next();
+  if (hit) emit("select", hit.nodeId);
+}
+
+function goPrev() {
+  const hit = prev();
+  if (hit) emit("select", hit.nodeId);
 }
 
 function onClose() {
@@ -69,6 +84,18 @@ function onClose() {
         title="Case sensitive"
         @click="caseSensitive = !caseSensitive"
       />
+      <div class="scope">
+        <Button
+          v-for="opt in (['both', 'keys', 'values'] as const)"
+          :key="opt"
+          :label="opt === 'both' ? 'All' : opt === 'keys' ? 'Keys' : 'Values'"
+          size="small"
+          text
+          :severity="target === opt ? 'primary' : 'secondary'"
+          :title="`Search ${opt === 'both' ? 'keys and values' : opt}`"
+          @click="target = opt"
+        />
+      </div>
       <Button
         icon="pi pi-times"
         size="small"
@@ -82,10 +109,31 @@ function onClose() {
     <div class="status mono">
       <i v-if="searching" class="pi pi-spinner pi-spin" />
       <span v-if="error" class="error">{{ error }}</span>
-      <span v-else-if="query.trim() && !searching">
-        {{ total.toLocaleString() }} match<template v-if="total !== 1">es</template>
-        <template v-if="truncated"> (truncated)</template>
-      </span>
+      <template v-else-if="query.trim() && !searching">
+        <span>
+          {{ total.toLocaleString() }} match<template v-if="total !== 1">es</template>
+          <template v-if="truncated"> (truncated)</template>
+        </span>
+        <span v-if="hits.length" class="hit-nav">
+          <Button
+            icon="pi pi-chevron-up"
+            size="small"
+            text
+            severity="secondary"
+            title="Previous match"
+            @click="goPrev"
+          />
+          <span class="hit-pos">{{ currentIndex >= 0 ? currentIndex + 1 : "–" }} / {{ hits.length.toLocaleString() }}</span>
+          <Button
+            icon="pi pi-chevron-down"
+            size="small"
+            text
+            severity="secondary"
+            title="Next match"
+            @click="goNext"
+          />
+        </span>
+      </template>
     </div>
 
     <div class="results">
@@ -136,11 +184,28 @@ function onClose() {
 .status {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.4rem;
-  padding: 0.35rem 0.6rem;
+  padding: 0.1rem 0.6rem;
   font-size: 0.75rem;
   color: var(--p-text-muted-color);
-  min-height: 1.2rem;
+  min-height: 1.6rem;
+}
+
+.scope {
+  display: flex;
+  align-items: center;
+}
+
+.hit-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.hit-pos {
+  min-width: 3.5rem;
+  text-align: center;
 }
 
 .status .error {

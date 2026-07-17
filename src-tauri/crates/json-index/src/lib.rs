@@ -17,7 +17,7 @@ pub use index::{
     StructuralIndex, NO_PARENT,
 };
 pub use scanner::{build_index, build_index_with_progress};
-pub use search::{search_bytes, SearchHit};
+pub use search::{search_bytes, search_scoped, SearchHit, SearchTarget};
 
 #[cfg(test)]
 mod tests;

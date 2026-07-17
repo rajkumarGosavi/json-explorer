@@ -14,18 +14,20 @@ import { useTree } from "@/composables/useTree";
 import { useFileStore } from "@/stores/file";
 import { copyText } from "@/utils/clipboard";
 import { formatBytes } from "@/utils/format";
-import { pathToString } from "@/utils/jsonPath";
+import { parseJsonPath, pathToString } from "@/utils/jsonPath";
 
 /** Matches MAX_VALUE_CAP in commands.rs — a copied subtree/value is capped. */
 const MAX_VALUE_BYTES = 1024 * 1024;
 
 const store = useFileStore();
 const router = useRouter();
-const { rows, error, loadRoot, toggle, loadMore } = useTree();
+const { rows, error, loadRoot, toggle, loadMore, expandToPath } = useTree();
 const selectedId = ref<string | null>(null);
 /** Keyboard cursor, tracked by rowId so "more" rows are addressable too. */
 const cursorRowId = ref<string | null>(null);
 const searchOpen = ref(false);
+const gotoText = ref("");
+const gotoError = ref(false);
 
 const treePanel = ref<HTMLElement | null>(null);
 const scrollerRef = ref<{ scrollToItem?: (index: number) => void } | null>(null);
@@ -88,9 +90,7 @@ async function applyNav(rowId: string) {
   cursorRowId.value = rowId;
   const row = rows.value.find((r) => r.rowId === rowId);
   if (row && row.type === "node") selectedId.value = row.nodeId;
-  await nextTick();
-  const i = rowIndex(rowId);
-  if (i >= 0) scrollerRef.value?.scrollToItem?.(i);
+  await scrollTo(rowId);
 }
 
 async function onKeydown(e: KeyboardEvent) {
@@ -127,6 +127,26 @@ onMounted(async () => {
   treePanel.value?.focus();
 });
 
+async function scrollTo(rowId: string) {
+  await nextTick();
+  const i = rowIndex(rowId);
+  if (i >= 0) scrollerRef.value?.scrollToItem?.(i);
+}
+
+async function submitGoto() {
+  const segs = parseJsonPath(gotoText.value.trim());
+  if (!segs) {
+    gotoError.value = true;
+    return;
+  }
+  const id = await expandToPath(segs);
+  gotoError.value = id === null;
+  if (id !== null) {
+    onSelect(id);
+    await scrollTo(id);
+  }
+}
+
 async function closeFile() {
   await store.close();
   void router.push({ name: "open" });
@@ -147,6 +167,18 @@ async function closeFile() {
         </span>
       </div>
       <div class="actions">
+        <IconField class="goto-field">
+          <InputIcon class="pi pi-directions" />
+          <InputText
+            v-model="gotoText"
+            placeholder="Go to path, e.g. $.a.b[3]"
+            size="small"
+            class="goto-input mono"
+            :invalid="gotoError"
+            @keyup.enter="submitGoto"
+            @input="gotoError = false"
+          />
+        </IconField>
         <Button
           icon="pi pi-search"
           :severity="searchOpen ? 'primary' : 'secondary'"
@@ -253,6 +285,11 @@ async function closeFile() {
   display: flex;
   align-items: center;
   gap: 0.15rem;
+}
+
+.goto-input {
+  width: 15rem;
+  font-size: 0.8rem;
 }
 
 .tree-error {

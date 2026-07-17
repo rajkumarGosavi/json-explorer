@@ -49,7 +49,7 @@ describe("useSearch", () => {
     s.query.value = "hello";
     await s.run();
     expect(s.searching.value).toBe(true);
-    expect(mocks.searchStart).toHaveBeenCalledWith("hello", false, false);
+    expect(mocks.searchStart).toHaveBeenCalledWith("hello", false, false, "both");
 
     mocks.listeners.hits!([hit("1", "$.a"), hit("2", "$.b")]);
     expect(s.hits.value).toHaveLength(2);
@@ -65,7 +65,15 @@ describe("useSearch", () => {
     s.regex.value = true;
     s.caseSensitive.value = true;
     await s.run();
-    expect(mocks.searchStart).toHaveBeenCalledWith("foo", true, true);
+    expect(mocks.searchStart).toHaveBeenCalledWith("foo", true, true, "both");
+  });
+
+  it("passes the keys/values scope through", async () => {
+    const s = useSearch();
+    s.query.value = "foo";
+    s.target.value = "keys";
+    await s.run();
+    expect(mocks.searchStart).toHaveBeenCalledWith("foo", false, false, "keys");
   });
 
   it("re-running clears previous hits", async () => {
@@ -108,5 +116,24 @@ describe("useSearch", () => {
     await s.run();
     expect(s.hits.value).toHaveLength(0);
     expect(mocks.searchStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("next/prev cycle through hits with wrap-around", () => {
+    const s = useSearch();
+    s.hits.value = [hit("a", "$.a"), hit("b", "$.b"), hit("c", "$.c")];
+    expect(s.currentIndex.value).toBe(-1);
+    expect(s.next()?.nodeId).toBe("a");
+    expect(s.currentIndex.value).toBe(0);
+    expect(s.next()?.nodeId).toBe("b");
+    expect(s.next()?.nodeId).toBe("c");
+    expect(s.next()?.nodeId).toBe("a"); // wraps forward
+    expect(s.prev()?.nodeId).toBe("c"); // wraps backward
+  });
+
+  it("next/prev are no-ops with no hits", () => {
+    const s = useSearch();
+    expect(s.next()).toBeNull();
+    expect(s.prev()).toBeNull();
+    expect(s.currentIndex.value).toBe(-1);
   });
 });

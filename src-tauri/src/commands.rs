@@ -4,8 +4,8 @@ use crate::dto::{
 };
 use crate::state::{AppState, Session, Source};
 use json_index::{
-    build_index_with_progress, leaf_value_end, peek_scalar_kind, search_bytes, IndexError,
-    JsonKind, NodeRef, RootKind, NO_PARENT,
+    build_index_with_progress, leaf_value_end, peek_scalar_kind, search_scoped, IndexError,
+    JsonKind, NodeRef, RootKind, SearchTarget, NO_PARENT,
 };
 use memmap2::Mmap;
 use std::fs::File;
@@ -293,9 +293,15 @@ pub fn search_start(
     query: String,
     regex: bool,
     case_sensitive: bool,
+    target: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let target = match target.as_str() {
+        "keys" => SearchTarget::Keys,
+        "values" => SearchTarget::Values,
+        _ => SearchTarget::Both,
+    };
     let (buf, index, generation, cancel, search_id) = {
         let guard = state.session.read();
         let session = guard.as_ref().ok_or("no file open")?;
@@ -318,7 +324,7 @@ pub fn search_start(
             }
         };
 
-        let (total, truncated) = search_bytes(&buf, &index, &query, regex, case_sensitive, |hit| {
+        let (total, truncated) = search_scoped(&buf, &index, &query, regex, case_sensitive, target, |hit| {
             if cancel.load(Ordering::SeqCst) || generation.load(Ordering::SeqCst) != search_id {
                 return false;
             }

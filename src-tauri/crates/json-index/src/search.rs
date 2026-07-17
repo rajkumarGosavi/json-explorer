@@ -2,7 +2,7 @@
 //! Each match's byte offset is later mapped to a tree path via
 //! `StructuralIndex::node_at_offset`.
 
-use crate::index::{NodeRef, StructuralIndex};
+use crate::index::{NodeRef, OffsetRole, StructuralIndex};
 use memchr::memmem;
 use regex::bytes::RegexBuilder;
 
@@ -15,21 +15,61 @@ pub struct SearchHit {
     pub match_len: u32,
 }
 
+/// Restrict which byte matches count as hits: everything, only matches inside
+/// object keys, or only matches inside values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTarget {
+    Both,
+    Keys,
+    Values,
+}
+
+impl SearchTarget {
+    fn accepts(self, role: OffsetRole) -> bool {
+        match self {
+            SearchTarget::Both => true,
+            SearchTarget::Keys => role == OffsetRole::Key,
+            SearchTarget::Values => role == OffsetRole::Value,
+        }
+    }
+}
+
 const PREVIEW_RADIUS: usize = 80;
 const MAX_HITS: usize = 10_000;
 
+/// Search over the whole buffer, counting every match (`SearchTarget::Both`).
 pub fn search_bytes(
     buf: &[u8],
     index: &StructuralIndex,
     query: &str,
     is_regex: bool,
     case_sensitive: bool,
+    on_hit: impl FnMut(SearchHit) -> bool, // return false to cancel
+) -> (usize, bool) {
+    search_scoped(buf, index, query, is_regex, case_sensitive, SearchTarget::Both, on_hit)
+}
+
+/// Like `search_bytes`, but only counts matches whose byte offset lands in the
+/// requested part of the document (keys vs values). `Both` skips the
+/// per-match classification entirely, so it costs nothing.
+pub fn search_scoped(
+    buf: &[u8],
+    index: &StructuralIndex,
+    query: &str,
+    is_regex: bool,
+    case_sensitive: bool,
+    target: SearchTarget,
     mut on_hit: impl FnMut(SearchHit) -> bool, // return false to cancel
 ) -> (usize, bool) {
     let mut count = 0usize;
     let mut truncated = false;
 
     let mut emit = |offset: usize, len: usize| -> bool {
+        if target != SearchTarget::Both
+            && !target.accepts(index.classify_offset(buf, offset as u64))
+        {
+            return true; // not in scope — skip without counting, keep scanning
+        }
         let hit = build_hit(buf, index, offset as u64, len as u32);
         count += 1;
         if count >= MAX_HITS {
